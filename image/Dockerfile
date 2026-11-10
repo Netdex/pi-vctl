@@ -9,7 +9,9 @@ RUN apt-get -o APT::Sandbox::User=root update \
 # Every container start copies the whole image, file by file, so files that nothing loads
 # are removed: npm's download cache, and type declarations, source maps and Markdown in
 # dependencies. pi keeps its own Markdown and types, which it shows to the model.
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.0 \
+# vctl build has no --build-arg, so `setup.ps1 -PiVersion` rewrites this default instead.
+ARG PI_VERSION=1.5.0
+RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
  && npm cache clean --force \
  && cd /usr/local/lib/node_modules \
  && pi=@earendil-works/pi-coding-agent \
@@ -26,5 +28,8 @@ RUN node /tmp/patch-shell.js "$(npm root -g)/@earendil-works/pi-coding-agent" \
 # keeps the script working if an editor saves it with CRLF line endings.
 COPY agent-patch.sh agent-patch.cjs /opt/pi-vctl/
 RUN sed -i 's/\r$//' /opt/pi-vctl/agent-patch.sh
+# The launcher mounts a host folder at /root/.cache, so downloads survive between runs.
+# pip and uv use it already; npm defaults to /root/.npm.
+ENV npm_config_cache=/root/.cache/npm
 WORKDIR /workspace
 ENTRYPOINT ["pi"]

@@ -13,6 +13,10 @@ function Get-PiVctlConfig {
         TempDir     = Join-Path $userProfile 'AppData\Local\Temp'
         VctlDir     = Join-Path $userProfile '.vctl'
         PiDir       = Join-Path $userProfile '.pi'
+        # pi's config. Only this part of ~/.pi is mounted, at /root/.pi/agent.
+        PiAgentDir  = Join-Path $userProfile '.pi\agent'
+        # Mounted at /root/.cache, so pip, npm and uv downloads survive between runs.
+        CacheDir    = Join-Path $userProfile '.pi\vctl\cache'
         Vctl        = Join-Path $installPath 'bin\vctl.exe'
         VDiskManager = Join-Path $installPath 'vmware-vdiskmanager.exe'
     }
@@ -146,16 +150,23 @@ function Test-PathInside {
     return ($p -ieq $q) -or $p.StartsWith("$q\", [StringComparison]::OrdinalIgnoreCase)
 }
 
-# Refuses folders that would hand the agent credentials or code the host runs.
-function Assert-SafeWorkspace {
+# Refuses folders that would hand the agent credentials or code the host runs, and
+# folders vctl cannot mount. Returns the full path, without a trailing backslash.
+function Assert-SafeMount {
     param(
         [Parameter(Mandatory)] $Config,
-        [Parameter(Mandatory)] [string] $Workspace,
+        [Parameter(Mandatory)] [string] $Path,
         [string] $OriginalHome
     )
-    $path = (Resolve-Path -LiteralPath $Workspace).ProviderPath.TrimEnd('\')
-    if ($path -notmatch '^[A-Za-z]:\\') { throw "Workspace must be on a local drive: $path" }
-    if ($path -match '^[A-Za-z]:$') { throw "Refusing to mount a drive root: $path" }
+    $resolved = Resolve-Path -LiteralPath $Path
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { throw "Not a folder: $resolved" }
+    $path = $resolved.ProviderPath.TrimEnd('\')
+    # Checked first: trimming turns D:\ into D:, which the next check would reject as not local.
+    if ($path -match '^[A-Za-z]:$') { throw "Refusing to mount a drive root: $path\" }
+    if ($path -notmatch '^[A-Za-z]:\\') { throw "Can only mount folders on a local drive: $path" }
+    if ([IO.DriveInfo]::new($path.Substring(0, 1)).DriveType -eq [IO.DriveType]::Network) {
+        throw "Can only mount folders on a local drive, not a mapped network drive: $path"
+    }
     # vctl parses --volume as CSV.
     if ($path.Contains(',')) { throw "vctl cannot mount a path containing a comma: $path" }
 
@@ -169,4 +180,55 @@ function Assert-SafeWorkspace {
         }
     }
     return $path
+}
+
+# Takes a path from Assert-SafeMount and writes it Unix-style: D:\dev\app becomes /d/dev/app.
+# pi files sessions by working directory, so each project needs its own container path.
+function ConvertTo-ContainerPath {
+    param([Parameter(Mandatory)] [string] $Path)
+    return '/' + $Path.Substring(0, 1).ToLowerInvariant() + ($Path.Substring(2) -replace '\\', '/')
+}
+
+# PI_VCTL_MOUNT_RO: folders separated by semicolons, like PATH. Returns their checked paths.
+# Overlapping mounts are refused, because which one wins inside the container is unclear.
+function Get-ReadOnlyMounts {
+    param(
+        [Parameter(Mandatory)] $Config,
+        [string] $List,
+        [Parameter(Mandatory)] [string] $Workspace,
+        [string] $OriginalHome
+    )
+    $mounts = @()
+    foreach ($entry in ($List -split ';')) {
+        $entry = $entry.Trim().Trim('"')
+        if (-not $entry) { continue }
+        $path = Assert-SafeMount -Config $Config -Path $entry -OriginalHome $OriginalHome
+        foreach ($other in @($Workspace) + $mounts) {
+            if ((Test-PathInside -Path $path -Parent $other) -or (Test-PathInside -Path $other -Parent $path)) {
+                throw "PI_VCTL_MOUNT_RO folder $path overlaps $other, which is also mounted."
+            }
+        }
+        $mounts += $path
+    }
+    return $mounts
+}
+
+# PI_VCTL_ENV: variable names separated by semicolons. Returns NAME=value for each one that
+# is set on the host. vctl parses -e as CSV, so values cannot contain commas or quotes.
+function Get-EnvPassthrough {
+    param([string] $List)
+    $pairs = @()
+    foreach ($name in ($List -split ';')) {
+        $name = $name.Trim()
+        if (-not $name) { continue }
+        if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "PI_VCTL_ENV has an invalid variable name: $name" }
+        $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if ($null -eq $value) {
+            Write-Warning "PI_VCTL_ENV names $name, which is not set, so the container will not get it."
+            continue
+        }
+        if ($value -match '[,"\r\n]') { throw "vctl cannot pass $name, because its value contains a comma, quote or line break." }
+        $pairs += "$name=$value"
+    }
+    return $pairs
 }

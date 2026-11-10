@@ -2,3 +2,4 @@
 models.json
 auth.json
 test/.smoke-*/
+image/Dockerfile.generated

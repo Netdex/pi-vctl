@@ -1,12 +1,31 @@
 # Prepares the vctl runtime and the pi image. Safe to re-run.
 #   .\setup.ps1              first-time setup
 #   .\setup.ps1 -Rebuild     rebuild the image, for example after editing image\Dockerfile
+#   .\setup.ps1 -PiVersion 1.6.0
+#                            rebuild with another pi version than the Dockerfile's default
 param(
-    [switch] $Rebuild
+    [switch] $Rebuild,
+    [string] $PiVersion
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\common.ps1')
 $config = Get-PiVctlConfig
+
+# vctl build has no --build-arg, so build from a copy of the Dockerfile with a new default.
+$dockerfile = Join-Path $PSScriptRoot 'image\Dockerfile'
+$generatedDockerfile = $null
+if ($PiVersion) {
+    # An exact version: a tag such as "latest" keeps the build step's text the same, so
+    # the build would reuse the cached install of the old version.
+    if ($PiVersion -notmatch '^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$') { throw "PiVersion must be an exact version such as 1.6.0, not '$PiVersion'." }
+    $text = Get-Content -LiteralPath $dockerfile -Raw
+    $pattern = '(?m)^ARG PI_VERSION=\S+'
+    if ($text -notmatch $pattern) { throw "image\Dockerfile has no 'ARG PI_VERSION=' line." }
+    $generatedDockerfile = Join-Path $PSScriptRoot 'image\Dockerfile.generated'
+    Set-Content -LiteralPath $generatedDockerfile -Value ($text -replace $pattern, "ARG PI_VERSION=$PiVersion") -NoNewline
+    $dockerfile = $generatedDockerfile
+    $Rebuild = $true
+}
 
 Invoke-WithVctlEnv -Config $config -Body {
     Write-Host 'Starting the vctl runtime...'
@@ -36,7 +55,11 @@ Invoke-WithVctlEnv -Config $config -Body {
         }
         if ($images.Contains($building)) { & $config.Vctl rmi $building }
         Write-Host "Building $($config.Image)..."
-        & $config.Vctl build -t $building (Join-Path $PSScriptRoot 'image')
+        try {
+            & $config.Vctl build -t $building -f $dockerfile (Join-Path $PSScriptRoot 'image')
+        } finally {
+            if ($generatedDockerfile) { Remove-Item -LiteralPath $generatedDockerfile -ErrorAction SilentlyContinue }
+        }
         if ($LASTEXITCODE -ne 0) { throw "vctl build failed with exit code $LASTEXITCODE. Run setup again; a retry can succeed." }
         if ($hasImage) {
             # rmi exits 0 even when it skips the image, so read its result instead.
