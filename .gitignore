@@ -1,0 +1,4 @@
+# Credentials live in ~/.pi, never in this repo.
+models.json
+auth.json
+test/.smoke-*/
