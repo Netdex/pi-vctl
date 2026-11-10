@@ -28,13 +28,20 @@ Invoke-WithVctlEnv -Config $config -Body {
         # vctl build refuses to overwrite a tag, so build under another one and only
         # replace the working image once the build has succeeded.
         $building = $config.Image -replace ':.*$', ':building'
+        # vctl cannot replace an image that any container, running or stopped, still uses.
+        $users = @(& $config.Vctl ps -a 2>&1 | Out-String -Stream |
+            Where-Object { $_ -match "^\S+\s+$([regex]::Escape($config.Image))\s" } | ForEach-Object { ($_ -split '\s+')[0] })
+        if ($hasImage -and $users.Count) {
+            throw "These containers still use $($config.Image): $($users -join ', '). Exit pi or run 'vctl rm -f <name>', then run setup again."
+        }
         if ($images.Contains($building)) { & $config.Vctl rmi $building }
         Write-Host "Building $($config.Image)..."
         & $config.Vctl build -t $building (Join-Path $PSScriptRoot 'image')
         if ($LASTEXITCODE -ne 0) { throw "vctl build failed with exit code $LASTEXITCODE. Run setup again; a retry can succeed." }
         if ($hasImage) {
-            & $config.Vctl rmi $config.Image
-            if ($LASTEXITCODE -ne 0) { throw "Could not replace $($config.Image). Is a container still using it? Check: vctl ps -a" }
+            # rmi exits 0 even when it skips the image, so read its result instead.
+            $removed = & $config.Vctl rmi $config.Image 2>&1 | Out-String
+            if ($removed -notmatch 'REMOVED') { throw "Could not replace $($config.Image): $($removed.Trim())" }
         }
         & $config.Vctl tag $building $config.Image
         if ($LASTEXITCODE -ne 0) { throw "Could not tag $building as $($config.Image)" }

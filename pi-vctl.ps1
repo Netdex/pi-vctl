@@ -1,10 +1,10 @@
-# Runs pi in a vctl container with the current folder mounted at /workspace.
+# Runs pi in a vctl container with the current folder mounted at the same path,
+# written Unix-style: D:\dev\app is mounted at /d/dev/app.
 # All arguments go to pi, so there is deliberately no param block: PowerShell would
 # otherwise claim flags such as -m. Settings come from environment variables:
 #   PI_VCTL_MEMORY     container memory limit, default 2g (vctl's own default is 512m)
 #   PI_VCTL_CPUS       CPU cores, default 4
 #   PI_VCTL_WORKSPACE  folder to mount, default the current folder
-#   PI_VCTL_AGENT_PATCH  0 skips patching the container's guest agent (see README)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\common.ps1')
 $config = Get-PiVctlConfig
@@ -12,6 +12,9 @@ $piArgs = @($args)
 $originalHome = $env:HOME
 $workspaceInput = if ($env:PI_VCTL_WORKSPACE) { $env:PI_VCTL_WORKSPACE } else { (Get-Location).ProviderPath }
 $workspace = Assert-SafeWorkspace -Config $config -Workspace $workspaceInput -OriginalHome $originalHome
+# pi files sessions by working directory, so each project needs its own path in the
+# container for --continue and --resume to find its sessions.
+$containerWorkspace = '/' + $workspace.Substring(0, 1).ToLowerInvariant() + ($workspace.Substring(2) -replace '\\', '/')
 $memory = if ($env:PI_VCTL_MEMORY) { $env:PI_VCTL_MEMORY } else { '2g' }
 $cpus = if ($env:PI_VCTL_CPUS) { $env:PI_VCTL_CPUS } else { '4' }
 
@@ -31,16 +34,14 @@ Invoke-WithVctlEnv -Config $config -Body {
     $runArgs = @(
         'run', '--rm', '--name', $containerName,
         '-c', $cpus, '-m', $memory,
-        '-v', "${workspace}:/workspace",
+        '-v', "${workspace}:$containerWorkspace",
         '-v', "$($config.PiDir):/root/.pi",
-        '-w', '/workspace'
+        '-w', $containerWorkspace
     )
     $patcher = $null
     if ($interactive) {
         $runArgs += '-it'
-        if ($env:PI_VCTL_AGENT_PATCH -ne '0') {
-            $patcher = Start-AgentPatch -Config $config -Container $containerName -StatusPath $patchStatusPath
-        }
+        $patcher = Start-AgentPatch -Config $config -Container $containerName -StatusPath $patchStatusPath
     }
     try {
         & $config.Vctl @runArgs $config.Image @piArgs
@@ -54,7 +55,7 @@ if (Test-Path -LiteralPath $patchStatusPath) {
     $patchStatus = (Get-Content -LiteralPath $patchStatusPath -Raw).Trim()
     Remove-Item -LiteralPath $patchStatusPath -ErrorAction SilentlyContinue
     if ($patchStatus -ne 'patched' -and $patchStatus -ne 'already-patched') {
-        Write-Warning "Could not turn off the container's terminal log ($patchStatus). tty-newline.cjs still protected pi itself."
+        Write-Warning "Could not patch the container's guest agent ($patchStatus), so long output could freeze the terminal. See the README."
     }
 }
 exit $exitCode

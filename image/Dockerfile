@@ -2,7 +2,8 @@
 # filesystem is 9P and apt cannot verify signatures there. It works during vctl build.
 FROM node:24-bookworm-slim
 RUN apt-get -o APT::Sandbox::User=root update \
- && apt-get -o APT::Sandbox::User=root install -y --no-install-recommends bash ca-certificates fd-find git ripgrep \
+ && apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
+      bash ca-certificates curl fd-find git jq make procps python3 python3-venv ripgrep \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 # Every container start copies the whole image, file by file, so files that nothing loads
@@ -21,10 +22,9 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.0 \
 COPY patch-shell.js /tmp/patch-shell.js
 RUN node /tmp/patch-shell.js "$(npm root -g)/@earendil-works/pi-coding-agent" \
  && rm /tmp/patch-shell.js
-# The two fixes for the TUI freeze: tty-newline.cjs is preloaded into pi, and the
-# launcher runs agent-patch.sh in the VM. The sed keeps the script working if an
-# editor saves it with CRLF line endings.
-COPY tty-newline.cjs agent-patch.sh agent-patch.cjs /opt/pi-vctl/
+# The launcher runs agent-patch.sh in the VM to stop the terminal freezing. The sed
+# keeps the script working if an editor saves it with CRLF line endings.
+COPY agent-patch.sh agent-patch.cjs /opt/pi-vctl/
 RUN sed -i 's/\r$//' /opt/pi-vctl/agent-patch.sh
 WORKDIR /workspace
-ENTRYPOINT ["node", "--require", "/opt/pi-vctl/tty-newline.cjs", "/usr/local/bin/pi"]
+ENTRYPOINT ["pi"]
