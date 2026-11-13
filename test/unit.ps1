@@ -89,6 +89,9 @@ try {
     Test-Case 'Get-ReadOnlyMounts splits on semicolons and strips quotes' {
         Assert-Equal (Get-ReadOnlyMounts -Config $config -List "`"$reference`"; $homeDir\code" -Workspace $project) @($reference, (Join-Path $homeDir 'code'))
     }
+    Test-Case 'Get-ReadOnlyMounts combines several lists, as from the variable and repeated options' {
+        Assert-Equal (Get-ReadOnlyMounts -Config $config -List @($null, $reference, "$homeDir\code;") -Workspace $project) @($reference, (Join-Path $homeDir 'code'))
+    }
     Test-Case 'Get-ReadOnlyMounts refuses folders that overlap the workspace or each other' {
         Assert-Throws { Get-ReadOnlyMounts -Config $config -List (Join-Path $project 'sub') -Workspace $project } 'overlaps'
         Assert-Throws { Get-ReadOnlyMounts -Config $config -List $project -Workspace (Join-Path $project 'sub') } 'overlaps'
@@ -113,6 +116,53 @@ try {
     Test-Case 'Get-EnvPassthrough refuses invalid names' {
         Assert-Throws { Get-EnvPassthrough -List 'BAD-NAME' } 'invalid'
         Assert-Throws { Get-EnvPassthrough -List 'A=B' } 'invalid'
+    }
+
+    function Parse { ConvertFrom-LauncherArgs -Arguments $args }
+    Test-Case 'ConvertFrom-LauncherArgs passes everything to pi without launcher options' {
+        $o = Parse -p 'list the tests' --model x
+        Assert-Equal $o.Command 'run'
+        Assert-Equal $o.PiArgs @('-p', 'list the tests', '--model', 'x')
+        Assert-Equal @((Parse).PiArgs).Count 0
+    }
+    Test-Case 'ConvertFrom-LauncherArgs reads options in both spellings, then stops at the first pi argument' {
+        $o = Parse --memory 4g --cpus=8 --workspace D:\w --mount-ro A --mount-ro=B --env X --env Y -c --memory 1g
+        Assert-Equal $o.Memory '4g'
+        Assert-Equal $o.Cpus '8'
+        Assert-Equal $o.Workspace 'D:\w'
+        Assert-Equal $o.MountRo @('A', 'B')
+        Assert-Equal $o.Env @('X', 'Y')
+        Assert-Equal $o.PiArgs @('-c', '--memory', '1g')
+    }
+    Test-Case 'ConvertFrom-LauncherArgs drops the first -- and passes the rest to pi' {
+        # Quoted, because PowerShell drops a bare -- in calls made inside a session.
+        $o = Parse --memory 4g '--' --help '--' x
+        Assert-Equal $o.Command 'run'
+        Assert-Equal $o.PiArgs @('--help', '--', 'x')
+    }
+    Test-Case 'ConvertFrom-LauncherArgs leaves pi subcommands and unknown options to pi' {
+        Assert-Equal (Parse update self).PiArgs @('update', 'self')
+        Assert-Equal (Parse --plan --update).PiArgs @('--plan', '--update')
+        Assert-Equal (Parse --MEMORY 4g).PiArgs @('--MEMORY', '4g')
+    }
+    Test-Case 'ConvertFrom-LauncherArgs parses commands' {
+        Assert-Equal (Parse -h).Command 'help'
+        Assert-Equal (Parse --help).Command 'help'
+        Assert-Equal (Parse --rebuild).Command 'rebuild'
+        $o = Parse --update
+        Assert-Equal "$($o.Command) [$($o.Version)]" 'update []'
+        Assert-Equal (Parse --update 1.6.0).Version '1.6.0'
+        Assert-Equal (Parse --update=1.6.0).Version '1.6.0'
+    }
+    Test-Case 'ConvertFrom-LauncherArgs refuses commands mixed with anything else' {
+        Assert-Throws { Parse --update 1.6.0 -p x } 'no other arguments'
+        Assert-Throws { Parse --rebuild 1.6.0 } 'no other arguments'
+        Assert-Throws { Parse --memory 4g --update } 'cannot be combined'
+        Assert-Throws { Parse --update --rebuild } 'cannot be combined'
+        Assert-Throws { Parse --rebuild=yes } 'takes no value'
+    }
+    Test-Case 'ConvertFrom-LauncherArgs refuses an option without its value' {
+        Assert-Throws { Parse --memory } 'needs a value'
     }
 } finally {
     Remove-Item Env:\PI_VCTL_UNIT_A -ErrorAction SilentlyContinue

@@ -14,7 +14,7 @@ This starts the runtime, creates a blank `crx.vmdk`, and builds the `pi-sandbox`
 
 Use `.\setup.ps1 -Rebuild` to rebuild the image after editing `image\Dockerfile`. A failed build keeps the old image.
 
-Use `.\setup.ps1 -PiVersion 1.6.0` to rebuild with another pi version. It must be an exact version, not `latest`. To change the default, edit `ARG PI_VERSION` in the Dockerfile. If `image\patch-shell.js` no longer fits the new version, the build fails and the old image stays.
+Use `pi-vctl.ps1 --update` to rebuild with the latest pi on npm, or `pi-vctl.ps1 --update 1.6.0` for a given version. It runs `.\setup.ps1 -PiVersion 1.6.0`, which you can also run directly. It must be an exact version, not `latest`. To change the default, edit `ARG PI_VERSION` in the Dockerfile. If `image\patch-shell.js` no longer fits the new version, the build fails and the old image stays.
 
 ## Usage
 
@@ -25,17 +25,23 @@ D:\dev\js\pi-vctl\pi-vctl.ps1
 D:\dev\js\pi-vctl\pi-vctl.ps1 -p "list the failing tests"
 ```
 
-All arguments go to pi. The current folder is mounted read-write at its own path, written Unix-style (`D:\dev\app` at `/d/dev/app`), so commit your work first. Each project keeps its own sessions for `--continue` and `--resume`, separate from Windows pi's.
+The current folder is mounted read-write at its own path, written Unix-style (`D:\dev\app` at `/d/dev/app`), so commit your work first. Each project keeps its own sessions for `--continue` and `--resume`, separate from Windows pi's.
 
-| Variable | Default | Use |
-|---|---|---|
-| `PI_VCTL_MEMORY` | `2g` | Memory limit. The VM gets 512 MB on top of this |
-| `PI_VCTL_CPUS` | `4` | CPU cores |
-| `PI_VCTL_WORKSPACE` | current folder | Folder to mount |
-| `PI_VCTL_MOUNT_RO` | none | More folders to mount read-only, separated by `;` like `PATH`. Each goes at its own Unix-style path |
-| `PI_VCTL_ENV` | none | Names of host variables to pass in, separated by `;`, such as `GITHUB_TOKEN;NPM_TOKEN`. Unset ones are skipped with a warning |
+The launcher's own options come first. The first argument that is not one of them, or `--`, starts pi's arguments, so `pi-vctl.ps1 -- --help` shows pi's help and `pi-vctl.ps1 --help` shows the launcher's. Inside PowerShell, quote it as `'--'`, because PowerShell drops a bare `--` before scripts see it. The options are long options only, because pi and its extensions own the short flags.
 
-The launcher refuses drive roots, home folders and their parents, folders such as `.pi`, `.ssh` and `AppData`, network drives, and folders that overlap another mount. It applies the same checks to `PI_VCTL_MOUNT_RO`.
+| Option | Variable | Default | Use |
+|---|---|---|---|
+| `--memory <size>` | `PI_VCTL_MEMORY` | `2g` | Memory limit. The VM gets 512 MB on top of this |
+| `--cpus <n>` | `PI_VCTL_CPUS` | `4` | CPU cores |
+| `--workspace <dir>` | `PI_VCTL_WORKSPACE` | current folder | Folder to mount read-write |
+| `--mount-ro <dir>` | `PI_VCTL_MOUNT_RO` | none | More folders to mount read-only, each at its own Unix-style path. The option repeats; the variable separates folders with `;` like `PATH` |
+| `--env <NAME>` | `PI_VCTL_ENV` | none | Host variables to pass in, such as `GITHUB_TOKEN`. The option repeats; the variable separates names with `;`. Unset ones are skipped with a warning |
+| `--update [VERSION]` | | | Rebuild the image with that pi version, default the latest on npm, then exit |
+| `--rebuild` | | | Rebuild the image with the Dockerfile's pi version, then exit |
+
+An option overrides its variable. For `--mount-ro` and `--env`, the options add to the variable's list.
+
+The launcher refuses drive roots, home folders and their parents, folders such as `.pi`, `.ssh` and `AppData`, network drives, and folders that overlap another mount. It applies the same checks to read-only mounts. It also checks that the memory limit is a size such as `2g` and that the CPU count is a whole number.
 
 `~/.pi/vctl/cache` is mounted at `/root/.cache`, so pip, uv and npm downloads are kept between runs and shared by all projects. Delete the folder to clear it. Packages installed outside a mounted folder are still lost when the container exits.
 

@@ -189,23 +189,28 @@ function ConvertTo-ContainerPath {
     return '/' + $Path.Substring(0, 1).ToLowerInvariant() + ($Path.Substring(2) -replace '\\', '/')
 }
 
-# PI_VCTL_MOUNT_RO: folders separated by semicolons, like PATH. Returns their checked paths.
-# Overlapping mounts are refused, because which one wins inside the container is unclear.
+# Splits strings such as PI_VCTL_MOUNT_RO on semicolons, like PATH, and drops empty entries.
+function Split-SemicolonList {
+    param([string[]] $List)
+    return @($List | ForEach-Object { "$_" -split ';' } | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
+}
+
+# --mount-ro and PI_VCTL_MOUNT_RO: folders to mount read-only. Each element of List can hold
+# several, separated by semicolons. Returns their checked paths. Overlapping mounts are
+# refused, because which one wins inside the container is unclear.
 function Get-ReadOnlyMounts {
     param(
         [Parameter(Mandatory)] $Config,
-        [string] $List,
+        [string[]] $List,
         [Parameter(Mandatory)] [string] $Workspace,
         [string] $OriginalHome
     )
     $mounts = @()
-    foreach ($entry in ($List -split ';')) {
-        $entry = $entry.Trim().Trim('"')
-        if (-not $entry) { continue }
+    foreach ($entry in (Split-SemicolonList $List)) {
         $path = Assert-SafeMount -Config $Config -Path $entry -OriginalHome $OriginalHome
         foreach ($other in @($Workspace) + $mounts) {
             if ((Test-PathInside -Path $path -Parent $other) -or (Test-PathInside -Path $other -Parent $path)) {
-                throw "PI_VCTL_MOUNT_RO folder $path overlaps $other, which is also mounted."
+                throw "Read-only mount $path overlaps $other, which is also mounted."
             }
         }
         $mounts += $path
@@ -213,22 +218,84 @@ function Get-ReadOnlyMounts {
     return $mounts
 }
 
-# PI_VCTL_ENV: variable names separated by semicolons. Returns NAME=value for each one that
-# is set on the host. vctl parses -e as CSV, so values cannot contain commas or quotes.
+# --env and PI_VCTL_ENV: names of host variables, separated by semicolons. Returns NAME=value
+# for each one that is set. vctl parses -e as CSV, so values cannot contain commas or quotes.
 function Get-EnvPassthrough {
-    param([string] $List)
+    param([string[]] $List)
     $pairs = @()
-    foreach ($name in ($List -split ';')) {
-        $name = $name.Trim()
-        if (-not $name) { continue }
-        if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "PI_VCTL_ENV has an invalid variable name: $name" }
+    foreach ($name in (Split-SemicolonList $List)) {
+        if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "Invalid variable name to pass in: $name" }
         $value = [Environment]::GetEnvironmentVariable($name, 'Process')
         if ($null -eq $value) {
-            Write-Warning "PI_VCTL_ENV names $name, which is not set, so the container will not get it."
+            Write-Warning "$name is not set, so the container will not get it."
             continue
         }
         if ($value -match '[,"\r\n]') { throw "vctl cannot pass $name, because its value contains a comma, quote or line break." }
         $pairs += "$name=$value"
     }
     return $pairs
+}
+
+# Splits pi-vctl.ps1's arguments into its own options and pi's arguments. The launcher's
+# options come first and are long options only (plus -h), because pi and its extensions
+# own the short flags. The first argument that is not a launcher option starts pi's
+# arguments; "--" ends the launcher's options explicitly and is not passed to pi.
+# --update and --rebuild are commands: they build the image and take no other arguments.
+function ConvertFrom-LauncherArgs {
+    param([string[]] $Arguments)
+    $Arguments = @($Arguments)
+    $options = [pscustomobject]@{
+        Command   = 'run'
+        Version   = $null
+        Memory    = $null
+        Cpus      = $null
+        Workspace = $null
+        MountRo   = @()
+        Env       = @()
+        PiArgs    = @()
+    }
+    $runOptionUsed = $false
+    $i = 0
+    while ($i -lt $Arguments.Count) {
+        $arg = $Arguments[$i]
+        if ($arg -ceq '--') { $i++; break }
+        $name = $arg
+        $value = $null
+        $hasValue = $false
+        if ($arg -cmatch '^(--[a-z-]+)=(.*)$') { $name = $Matches[1]; $value = $Matches[2]; $hasValue = $true }
+
+        if ($name -cin '--memory', '--cpus', '--workspace', '--mount-ro', '--env') {
+            if (-not $hasValue) {
+                if ($i + 1 -ge $Arguments.Count) { throw "$name needs a value. See pi-vctl --help." }
+                $i++
+                $value = $Arguments[$i]
+            }
+            switch -CaseSensitive ($name) {
+                '--memory'    { $options.Memory = $value }
+                '--cpus'      { $options.Cpus = $value }
+                '--workspace' { $options.Workspace = $value }
+                '--mount-ro'  { $options.MountRo += $value }
+                '--env'       { $options.Env += $value }
+            }
+            $runOptionUsed = $true
+        } elseif ($name -cin '--update', '--rebuild', '--help', '-h') {
+            if ($options.Command -ne 'run') { throw "$name cannot be combined with --$($options.Command)." }
+            $options.Command = $name.TrimStart('-') -replace '^h$', 'help'
+            if ($hasValue -and $name -cne '--update') { throw "$name takes no value." }
+            if ($name -ceq '--update') {
+                # The version is optional, so only a next argument that is not an option is taken.
+                if ($hasValue) { $options.Version = $value }
+                elseif ($i + 1 -lt $Arguments.Count -and -not $Arguments[$i + 1].StartsWith('-')) { $i++; $options.Version = $Arguments[$i] }
+            }
+        } else {
+            break
+        }
+        $i++
+    }
+    $options.PiArgs = @($Arguments | Select-Object -Skip $i)
+    if ($options.Command -ne 'run') {
+        if ($runOptionUsed) { throw "--$($options.Command) cannot be combined with options for running pi." }
+        if ($options.PiArgs.Count) { throw "--$($options.Command) takes no other arguments, but got: $($options.PiArgs -join ' ')" }
+    }
+    return $options
 }
