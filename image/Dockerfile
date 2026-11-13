@@ -10,7 +10,7 @@ RUN apt-get -o APT::Sandbox::User=root update \
 # are removed: npm's download cache, and type declarations, source maps and Markdown in
 # dependencies. pi keeps its own Markdown and types, which it shows to the model.
 # vctl build has no --build-arg, so `setup.ps1 -PiVersion` rewrites this default instead.
-ARG PI_VERSION=1.5.1
+ARG PI_VERSION=1.5.2
 RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
  && npm cache clean --force \
  && cd /usr/local/lib/node_modules \
